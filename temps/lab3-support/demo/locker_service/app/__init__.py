@@ -1,0 +1,1 @@
+"""Locker Service FastAPI application."""

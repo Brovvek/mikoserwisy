@@ -1,4 +1,4 @@
-# Market Service — LAB1 i LAB2
+# Market Service — LAB1, LAB2 i LAB3
 
 Pierwsza usługa projektu **„agregator i analizator ogłoszeń samochodowych”**. System zbiera oferty z portali ogłoszeniowych (otomoto.pl, autoscout24.de, autobazar.eu), sprowadza je do wspólnego modelu i śledzi zmiany cen, żeby dało się porównywać oferty i rynki różnych krajów.
 
@@ -6,13 +6,15 @@ Docelowy kształt systemu jest wzorowany na projekcie AutoRadar: podział na col
 
 - **LAB1:** dane w pamięci procesu (sekcje 1–7).
 - **LAB2:** dane w bazie SQLite przez SQLAlchemy, szczegóły oferty w cache Redis (cache-aside z TTL i unieważnianiem). Kontrakt API się nie zmienił. Zmiany, decyzje i dowody opisuje [sekcja 8](#8-lab2--baza-danych-i-cache).
+- **LAB3:** rejestracja w Eurece jako `MARKET-SERVICE`. Druga usługa, [collector-service](../collector-service/README.md), odnajduje ją po nazwie. API, baza i cache się nie zmieniły. Opis i wyniki: [sekcja 9](#9-lab3--rejestracja-i-odnajdywanie-usług).
 
-Odpowiedzi na pytania z części A instrukcji (przykład Locker Service): LAB1 — [czesc-a-locker-service.md](czesc-a-locker-service.md), LAB2 — [czesc-a-lab2-locker-service.md](czesc-a-lab2-locker-service.md).
+Odpowiedzi na pytania z części A instrukcji (przykład Locker Service): LAB1 — [czesc-a-locker-service.md](czesc-a-locker-service.md), LAB2 — [czesc-a-lab2-locker-service.md](czesc-a-lab2-locker-service.md), LAB3 — [czesc-a-lab3-locker-service.md](czesc-a-lab3-locker-service.md).
 
 ```
 market-service/
 ├── app/
-│   ├── main.py         # create_app(), lifespan (baza, Redis), endpointy, dane początkowe, mapowanie błędów na HTTP
+│   ├── main.py         # create_app(), lifespan (baza, Redis, Eureka), endpointy, dane początkowe, mapowanie błędów na HTTP
+│   ├── eureka.py       # LAB3: klient rejestru z konfiguracji środowiska (z paczki LAB3)
 │   ├── models.py       # modele Pydantic: kontrakt API i walidacja
 │   ├── db_models.py    # LAB2: tabele listing i price_change (SQLAlchemy ORM)
 │   ├── database.py     # LAB2: silnik i fabryka sesji (z paczki LAB2)
@@ -21,9 +23,11 @@ market-service/
 ├── tests/
 │   ├── conftest.py     # fixture: osobna baza w tmp_path i zamiennik Redis dla każdego testu
 │   ├── memory_redis.py # zamiennik Redis z paczki LAB2
+│   ├── fake_eureka.py  # LAB3: zamiennik klienta Eureki
 │   ├── test_health.py
 │   ├── test_listings.py       # testy API z LAB1
-│   └── test_storage_cache.py  # testy LAB2: trwałość, cache, awarie
+│   ├── test_storage_cache.py  # testy LAB2: trwałość, cache, awarie
+│   └── test_eureka.py         # testy LAB3: cykl życia klienta rejestru
 ├── requests/           # treści żądań JSON do scenariusza ręcznego
 ├── requirements.txt
 └── README.md
@@ -31,7 +35,7 @@ market-service/
 
 ## Uruchomienie i testy
 
-Wymagania: Python 3.12 lub nowszy (sprawdzono na 3.14.0), PowerShell, a od LAB2 także Redis — np. Docker Desktop. Testy automatyczne nie wymagają Redis. Otwórz terminal w katalogu `market-service`, w którym leży ten plik.
+Wymagania: Python 3.12 lub nowszy (sprawdzono na 3.14.0), PowerShell, od LAB2 Redis — np. Docker Desktop, a od LAB3 Eureka Server ([sekcja 9.2](#92-konfiguracja-i-uruchomienie)). Testy automatyczne nie wymagają Redis ani Eureki. Otwórz terminal w katalogu `market-service`, w którym leży ten plik.
 
 ```powershell
 python -m venv .venv
@@ -45,10 +49,13 @@ $env:DATABASE_URL = 'sqlite:///./app.db'
 $env:REDIS_URL = 'redis://localhost:6379/0'
 $env:CACHE_PREFIX = 'lab2:mkotulski:market-service'
 $env:CACHE_TTL_SECONDS = '60'
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8101
+$env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+$env:SERVICE_NAME = 'MARKET-SERVICE'
+$env:SERVICE_PORT = '8101'
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8101
 ```
 
-Zmienne środowiskowe opisuje [sekcja 8.2](#82-uruchomienie-i-konfiguracja). `CACHE_PREFIX` jest wymagany: bez niego aplikacja nie wystartuje.
+Zmienne środowiskowe opisują [sekcja 8.2](#82-uruchomienie-i-konfiguracja) i [sekcja 9.2](#92-konfiguracja-i-uruchomienie). `CACHE_PREFIX` jest wymagany: bez niego aplikacja nie wystartuje.
 
 W drugim terminalu:
 
@@ -62,9 +69,9 @@ status service
 ok     market-service
 ```
 
-Dokumentacja API: [Swagger UI](http://localhost:8101/docs) i [ReDoc](http://localhost:8101/redoc). Serwer zatrzymuje się przez `Ctrl+C`. Nie trzeba aktywować środowiska. Jeśli port jest zajęty, czyli `Get-NetTCPConnection -LocalPort 8101 -State Listen` zwraca rekord, uruchom usługę np. z `--port 8102` i zmień port w poleceniach.
+Dokumentacja API: [Swagger UI](http://localhost:8101/docs) i [ReDoc](http://localhost:8101/redoc). Serwer zatrzymuje się przez `Ctrl+C`. Nie trzeba aktywować środowiska. Jeśli port jest zajęty, czyli `Get-NetTCPConnection -LocalPort 8101 -State Listen` zwraca rekord, ustal, co go zajmuje. Port 8102 należy do collector-service. Inny port trzeba ustawić jednocześnie w `SERVICE_PORT` i `--port`, np. 8103, i zmienić go w poleceniach.
 
-`--reload` restartuje proces po zapisaniu zmian w kodzie. Na LAB1 restart kasował dane z pamięci (sekcja 4). Od LAB2 dane zostają w pliku `app.db`. `--reload` nie przejmuje zmian zmiennych środowiskowych — po ich zmianie zatrzymaj Uvicorna i uruchom go ponownie.
+Od LAB3 usługę uruchamia się bez `--reload` (zalecenie instrukcji na czas eksperymentów z rejestrem). `--reload` restartuje proces po zapisaniu zmian w kodzie i nie przejmuje zmian zmiennych środowiskowych — po ich zmianie zatrzymaj Uvicorna i uruchom go ponownie. Na LAB1 restart kasował dane z pamięci (sekcja 4). Od LAB2 dane zostają w pliku `app.db`.
 
 ## 1. Problem i granice
 
@@ -111,7 +118,7 @@ Przeliczanie cen po kursach NBP, ocena ceny oferty, wykrywanie sprzedanych ofert
 | Planowana usługa | Odpowiedzialność | Własne dane | Operacje | Potrzebne informacje od innej usługi |
 |---|---|---|---|---|
 | Pierwsza — **market-service**, implementowana teraz (port 8101) | Wiedza o rynku: oferty z portali w jednym modelu i historia ich cen | Oferty: źródło, numer w portalu, kraj, link, tytuł, marka, model, rocznik, przebieg, paliwo, cena, waluta, czas pierwszej i ostatniej obserwacji, historia cen | Lista z filtrami, szczegóły, rejestracja nowej oferty, zapis nowszej obserwacji | Docelowo od collector-service: obserwacje ofert z portali. Na LAB1 — żadne; dane wprowadza się przez API |
-| Druga — **collector-service**, implementowana później (np. port 8102) | Skąd i kiedy pobierać: wycinki rynku (segmenty) i uprzejme pobieranie list wyników z portali | Segmenty (marka, model, roczniki, portale), przebiegi pobierania, stan portali (np. wstrzymanie po serii odmów) | Konfiguracja segmentów, uruchamianie i odczyt przebiegów, stan portali | Do pobierania — żadne. Wynik pracy, czyli obserwacje ofert, przekazuje do market-service |
+| Druga — **collector-service**, od LAB3 w katalogu [collector-service](../collector-service/README.md) (port 8102; na razie stan portali) | Skąd i kiedy pobierać: wycinki rynku (segmenty) i uprzejme pobieranie list wyników z portali | Segmenty (marka, model, roczniki, portale), przebiegi pobierania, stan portali (np. wstrzymanie po serii odmów) | Konfiguracja segmentów, uruchamianie i odczyt przebiegów, stan portali | Do pobierania — żadne. Wynik pracy, czyli obserwacje ofert, przekazuje do market-service |
 
 ### Granice biznesowe i właściciel zapisu
 
@@ -129,7 +136,7 @@ To także granica znaczenia pojęć, punkt wyjścia do bounded context. „Ofert
 
 ### Przyszłe wywołanie między usługami
 
-To projekt kontraktu; komunikacja nie jest zaimplementowana na LAB1.
+To projekt kontraktu; komunikacja nie jest zaimplementowana na LAB1. Zaimplementowane na LAB3 wywołanie to inny, prostszy odczyt ([sekcja 9.3](#93-kontrakt-komunikacji-między-usługami)); opisany tu zapis obserwacji pozostaje planem.
 
 - **Nadawca:** collector-service, po odczytaniu strony wyników z portalu.
 - **Odbiorca:** market-service.
@@ -988,8 +995,225 @@ Z nieoficjalnych skilli SQLAlchemy z sekcji 10 instrukcji nie korzystano.
   - kontrola, czy testy wykrywają celowo wprowadzone błędy (5 z 6 wykrytych, sekcja 8.3);
   - ręczne scenariusze z prawdziwym Redis i restartem Uvicorna (sekcja 8.4);
   - sprawdzenie, czy odnośniki z sekcji 8.6 prowadzą do istniejących fragmentów dokumentacji.
-- **Kolejny etap pierwszej usługi:** LAB3 — rejestracja w Eurece. Później zdarzenie `listing.observed` zamiast synchronicznego `POST`/`PATCH` oraz PostgreSQL z migracjami (punkt 6 wyżej).
+- **Kolejny etap pierwszej usługi:** LAB3 — rejestracja w Eurece (zrealizowane, sekcja 9). Później zdarzenie `listing.observed` zamiast synchronicznego `POST`/`PATCH` oraz PostgreSQL z migracjami (punkt 6 wyżej).
 - **Druga usługa (collector-service, port 8102) — aktualizacja planu:**
   - własna baza: segmenty, przebiegi i stan portali; nie pisze do `listing` ani `price_change`;
   - Redis do limitu tempa na domenę portalu (jak w AutoRadar), z własnym prefiksem, np. `lab2:mkotulski:collector-service`;
   - przy niedostępności market-service przechowuje obserwacje i ponawia wysyłkę — bezpiecznie dzięki 409 i idempotentnej powtórce (sekcja 1).
+
+## 9. LAB3 — rejestracja i odnajdywanie usług
+
+### 9.1. Usługi i granice odpowiedzialności
+
+| Usługa | Odpowiedzialność | Właściciel danych | Endpoint w scenariuszu | Nazwa w Eurece | Port |
+|---|---|---|---:|---|---:|
+| **market-service** (ten katalog) | Co wiemy o rynku: oferty i historia cen | Oferty i historia cen (SQLite, cache w Redis) | `GET /listings/{listing_id}` | `MARKET-SERVICE` | 8101 |
+| **[collector-service](../collector-service/README.md)** | Skąd i kiedy pobierać: stan portali i decyzja, czy wolno teraz z nich pobierać | Stan portali (mały zestaw lokalny: `enabled`, `blocked_until`) | `GET /refresh-check/{listing_id}` | `COLLECTOR-SERVICE` | 8102 |
+
+**Kto potrzebuje danych i dlaczego należą do drugiej usługi.** Zanim collector ponownie pobierze ofertę, musi znać jej adres i portal oraz sprawdzić, czy ten portal nie jest wyłączony albo wstrzymany. Ofertę zna tylko market-service, a stan portali tylko collector. Collector nie kopiuje tabeli `listing` i nie łączy się z bazą market-service: czyta ofertę przez API, a market-service niczego nie wie o stanie portali.
+
+**Co dostaje odbiorca przy awarii zależności.** Kontrolowane `503`. Własne dane collectora, np. `GET /sources`, działają dalej, ale decyzji o konkretnej ofercie nie da się podjąć, więc usługa nie zwraca pozornego `200`.
+
+**Kierunek AutoRadar.** Układ katalogów odpowiada `services/market` i `services/collector`, a pola `Source` — modelowi `SourceOut` i tabeli `source_state` (`enabled`, `blocked_until`). Endpoint `GET /sources` ma tę samą ścieżkę. Odczyt `GET /listings/{id}` w tym samym celu wykonuje `MarketClient.listing_detail` z alert-service. Są też dwie świadome różnice. AutoRadar nie ma Eureki, bo adresy usług daje mu Docker Compose, a ruch obsługuje Traefik. Nie ma też `refresh-check`: jego collector przekazuje obserwacje zdarzeniami RabbitMQ, które są poza zakresem tego etapu.
+
+### 9.2. Konfiguracja i uruchomienie
+
+- **Wersje:** Python 3.14.0, FastAPI 0.162.0, Uvicorn 0.54.0, httpx 0.28.1, `py-eureka-client` 0.13.3. Eureka Server z paczki: Spring Cloud 2025.1.3, Java 21.
+- **Adres Eureka Server:** `http://127.0.0.1:8761` (bez `/eureka`; ścieżkę API ustawia `eureka_context="/eureka"`).
+- **Sposób uruchomienia rejestru:** Docker Compose z paczki `temps/lab3-support`. Działa w kontenerze wyłącznie rejestr; usługi to lokalne procesy.
+- **Cykl życia:** `create_app(database_url=None, redis_client=None, eureka_client=None)`. Kolejność: baza i cache (`storage_lifespan`) → `eureka.start()` → obsługa żądań → `eureka.stop()` → zamknięcie Redis i silnika bazy. Dzięki temu zarejestrowana instancja ma już gotowe dane, a przy zamykaniu najpierw wyrejestrowuje się z rejestru.
+
+| Zmienna | market-service | collector-service | Znaczenie |
+|---|---|---|---|
+| `SERVICE_NAME` | `MARKET-SERVICE` | `COLLECTOR-SERVICE` | Nazwa logiczna w rejestrze |
+| `SERVICE_PORT` | `8101` | `8102` | Port zgłaszany do rejestru; musi być równy `uvicorn --port` |
+| `EUREKA_SERVER_URL` | `http://127.0.0.1:8761` | to samo | Adres rejestru — jedyny adres infrastruktury w konfiguracji |
+| `INSTANCE_IP` | `127.0.0.1` | to samo | Adres osiągalny dla drugiej usługi (nie `0.0.0.0`) |
+| `INSTANCE_HOST` | `localhost` | to samo | Nazwa hosta; `do_service()` łączy się właśnie przez nią |
+
+Wartości w tabeli są też domyślne w kodzie. Haseł ani sekretów nie ma. Zmienne LAB2 opisuje sekcja 8.2.
+
+**Uruchomienie.** Każdy blok w osobnym terminalu, w podanej kolejności. Oba `.venv` tworzy się raz: `python -m venv .venv` i `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` w katalogu każdej usługi.
+
+```powershell
+# 1. Rejestr i Redis (Docker Desktop musi działać). Panel: http://localhost:8761/
+Set-Location temps\lab3-support
+docker compose up --build -d eureka
+docker start lab2-redis
+
+# 2. market-service — polecenia z sekcji „Uruchomienie i testy”, katalog market-service
+
+# 3. collector-service — katalog collector-service
+$env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+$env:SERVICE_NAME = 'COLLECTOR-SERVICE'
+$env:SERVICE_PORT = '8102'
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8102
+
+# 4. Sprawdzenie, gdy obie usługi są UP w panelu. Pierwsze 503 może oznaczać nieodświeżoną kopię rejestru (sekcja 9.5)
+curl.exe -i http://127.0.0.1:8102/refresh-check/1
+```
+
+**Testy** (bez Eureki i Redis), w katalogu każdej usługi: `.\.venv\Scripts\python.exe -m pytest -q`.
+
+**Zatrzymanie i reset.** Obie usługi: `Ctrl+C`. Rejestr: `docker compose down` w `temps\lab3-support`; jego stan jest tylko w pamięci, więc restart daje pusty rejestr. Redis: `docker stop lab2-redis`. Reset danych market-service opisuje sekcja 8.2; collector nie ma trwałych danych.
+
+### 9.3. Kontrakt komunikacji między usługami
+
+- **Usługa wywołująca:** collector-service, endpoint `GET /refresh-check/{listing_id}`.
+- **Nazwa logiczna odnajdywanej usługi:** `MARKET-SERVICE`. W kodzie collectora nie ma jej adresu.
+- **Metoda i ścieżka:** `GET /listings/{listing_id}` przez `do_service("MARKET-SERVICE", f"/listings/{listing_id}", return_type="json", timeout=3)`.
+- **Dane wejściowe:** `listing_id` — liczba całkowita ze ścieżki. Inna wartość daje `422` bez wywołania market-service.
+- **Wymagane pola odpowiedzi market-service:** `id`, `source`, `external_id`, `url`, `last_seen_at`. Pozostałe są pomijane (tolerant reader) i nie są nigdzie zapisywane.
+- **Timeout:** 3 s na pojedyncze wywołanie HTTP; nie jest to limit całego przepływu. Bez ponowień i circuit breakera, zgodnie z zakresem etapu.
+
+Odpowiedź `200` dla oferty 3, której portal jest wyłączony:
+
+```json
+{
+  "listing": {
+    "id": 3,
+    "source": "autobazar_eu",
+    "external_id": "198765432",
+    "url": "https://www.autobazar.eu/detail/skoda-octavia-combi-2-0-tdi-style/198765432/",
+    "last_seen_at": "2026-10-20T10:00:00Z"
+  },
+  "source": {"id": "autobazar_eu", "label": "autobazar.eu", "country": "SK", "domain": "www.autobazar.eu", "enabled": false, "blocked_until": null},
+  "can_refresh": false,
+  "blocker": "source_disabled"
+}
+```
+
+`blocker` przyjmuje wartości `source_disabled`, `source_blocked`, `source_unknown` albo `null`. Portal nieznany collectorowi to poprawna odpowiedź z `source: null`, a nie błąd: `source` w market-service jest zwykłym tekstem.
+
+| Sytuacja | Odpowiedź collector-service | Znaczenie |
+|---|---|---|
+| Oferta istnieje | `200`, `can_refresh` i `blocker` | Decyzja podjęta |
+| Market-service zwrócił `404` | `404`, `Listing not found in Market Service` | Oferty nie ma; ponawianie nic nie zmieni |
+| Market-service zwrócił inny błąd HTTP | `502`, `Market Service returned an HTTP error` | Zależność odpowiedziała błędem |
+| Market-service zwrócił `200` niezgodne z kontraktem (nie JSON, brak pól) | `502`, `Market Service returned an invalid response` | Dopisane względem przykładu: bez tego byłby nieobsłużony wyjątek i `500` |
+| Brak instancji, brak połączenia, timeout | `503`, `Market Service is unavailable` | Brak odpowiedzi zależności; można spróbować później |
+
+```mermaid
+sequenceDiagram
+    participant C as collector-service :8102
+    participant E as Eureka :8761
+    participant M as market-service :8101
+    participant D as SQLite + Redis
+    M->>E: rejestracja MARKET-SERVICE, localhost:8101
+    C->>E: rejestracja COLLECTOR-SERVICE, localhost:8102
+    C->>E: pobranie rejestru do lokalnej kopii
+    loop co 30 s
+        M->>E: heartbeat
+        C->>E: heartbeat i odświeżenie kopii
+    end
+    Note over C: GET /refresh-check/1 — adres z lokalnej kopii, bez pytania Eureki
+    C->>M: GET /listings/1 (timeout 3 s)
+    M->>D: cache-aside
+    D-->>M: oferta
+    M-->>C: 200, oferta
+    Note over C: Decyzja na podstawie własnego stanu portalu
+```
+
+### 9.4. Testy automatyczne
+
+Żaden test nie wymaga Eureki, Redis ani sieci. Każda fabryka aplikacji dostaje zamiennik klienta. Market-service dostaje też bazę w `tmp_path` i `MemoryRedis`.
+
+**Collector-service** ([tests/test_refresh_check.py](../collector-service/tests/test_refresh_check.py)) — wymagane minimum to pierwsze cztery:
+
+| Test | Co wykazuje |
+|---|---|
+| `test_refresh_check_discovers_market_service_by_name` | `200`, pola odpowiedzi i wywołanie `("MARKET-SERVICE", "/listings/1", "json", 3)` |
+| `test_refresh_check_returns_404_when_market_does_not_know_listing` | `404` z zależności → `404` |
+| `test_refresh_check_returns_503_and_stays_healthy_when_market_is_down` | `URLError`, `TimeoutError`, `DiscoverException`, `WalkNodeException` → `503`; `/health` i `/sources` nadal `200` |
+| `test_refresh_check_maps_other_http_errors_to_502` | `400`, `409`, `500`, `503` z zależności → `502` |
+| `test_refresh_check_maps_response_breaking_contract_to_502` | Nie JSON, brak pól, nie obiekt → `502` |
+| `test_refresh_check_applies_own_rule_to_market_data` | Reguła collectora: wyłączony, wstrzymany, po wstrzymaniu, nieznany portal |
+| `test_refresh_check_uses_requested_identifier` | Ścieżka zawiera identyfikator z żądania, a nie stałą |
+| `test_invalid_identifier_is_rejected_before_calling_market` | `422` bez wywołania zależności |
+| `test_eureka_client_starts_and_stops_with_application` | `start()` i `stop()` po jednym razie, w `lifespan` |
+| `test_sources_are_served_without_calling_market` | Własne dane nie zależą od market-service |
+
+**Market-service** ([tests/test_eureka.py](tests/test_eureka.py)): `start()` i `stop()` z cyklem życia aplikacji, rejestracja dopiero po przygotowaniu danych, `stop()` i zamknięcie zasobów także po błędzie `start()`.
+
+Wyniki (2026-11-02, Windows 10, Python 3.14.0):
+
+```
+market-service:    39 passed, 1 warning   (27 LAB1 + 9 LAB2 + 3 LAB3)
+collector-service: 21 passed
+```
+
+Ostrzeżenie to wcześniej opisane `DeprecationWarning` biblioteki Starlette. Testy LAB1 i LAB2 zmieniły się tylko o przekazanie `eureka_client=FakeEurekaClient()`.
+
+**Skuteczność testów** sprawdzono na kopii kodu z celowo wprowadzonymi błędami. Wykryto wszystkie 13. W collectorze: zła nazwa usługi, stały identyfikator, inny timeout, `404` zamienione na `502`, inny kod zamiast `502`, brak obsługi `TimeoutError`, brak obsługi niepoprawnej odpowiedzi, ignorowanie `blocked_until`, brak `start()`, brak `stop()`. W market-service: brak `start()`, brak `stop()`, rejestracja przed przygotowaniem danych.
+
+Atrapa potwierdza sposób użycia klienta, a nie poprawność adresu w prawdziwym rejestrze. To sprawdzają scenariusze poniżej.
+
+### 9.5. Wyniki weryfikacji z prawdziwą Eureką
+
+Wykonano 2026-11-02: Eureka i Redis w Dockerze, obie usługi jako osobne procesy Uvicorna, baza w pliku tymczasowym, a nie w `app.db`. Scenariusze wykonał skrypt, który wysyłał żądania HTTP i czytał stan z `GET /eureka/apps`. „Ctrl+C” oznacza tu sygnał `CTRL_BREAK`, który Uvicorn obsługuje jak `Ctrl+C` (w logu `Application shutdown complete`). Awarię symulowało `kill` procesu.
+
+| Scenariusz | Stan początkowy i żądanie | Oczekiwany wynik | Wynik rzeczywisty | Przywrócenie stanu |
+|---|---|---|---|---|
+| Rejestracja | Uruchomienie rejestru i obu usług | Obie instancje `UP` | `MARKET-SERVICE` `localhost/127.0.0.1:8101 UP`, `COLLECTOR-SERVICE` `localhost/127.0.0.1:8102 UP`, widoczne do 9 s po starcie | — |
+| Odnajdywanie | Obie działają; `GET :8102/refresh-check/1` | `200` z danymi oferty | Najpierw `503` przez 25–28 s, do odświeżenia kopii rejestru; potem `200`, `listing.id = 1`, `can_refresh: true` | — |
+| Własna reguła | `GET :8102/refresh-check/3` | `200`, portal wyłączony | `200`, `can_refresh: false`, `blocker: source_disabled` | — |
+| Brak zasobu | `GET :8102/refresh-check/999` | `404` | `404`, `Listing not found in Market Service`; procesy działają dalej | — |
+| Inny błąd HTTP | `GET :8102/refresh-check/99999999999999999999`: market-service odpowiada `500` | `502` | `502`, `Market Service returned an HTTP error` (przyczynę opisuje sekcja 9.6) | — |
+| Awaria zależności | Ctrl+C na market-service, ponowienie żądania | `503`; health wywołującej `200` | `503` po ok. 2,9 s; `/health` i `/sources/otomoto` `200`. Kolejne żądania przez ponad minutę także `503` | Następny wiersz |
+| Przywrócenie zależności | Restart market-service, odświeżenie kopii | Ponownie `200` z danymi | `200` po 47 s od startu; po restarcie zaraz po awarii, gdy wpis nie zdążył zniknąć: po 1,2 s | — |
+| Nagła awaria | `kill` market-service, obserwacja przez 150 s | `503`; wpis może zostać | `503`; wpis `UP` przez całe 150 s obserwacji | Restart: `200` po 1,2 s |
+| Nowy port, ta sama nazwa | Market-service na 8103 (`SERVICE_PORT` i `--port`) | `200` bez zmiany kodu collectora | `200` po 19 s | Powrót na 8101: `200` po 25 s |
+| Awaria rejestru | `docker compose stop eureka` | Wywołania z kopii działają | `200` zaraz po zatrzymaniu i po 41 s; w logach ostrzeżenia klienta | Niżej |
+| Nowy klient bez rejestru | Eureka zatrzymana, nowa instancja collectora na 8104 | Brak kopii rejestru | Proces startuje, `/health` `200`, `refresh-check` `503` | Zatrzymanie instancji |
+| Restart rejestru | `docker compose start eureka`, pusty rejestr | Klienci wracają | Oba wpisy `UP` po 48–58 s, `200` po kolejnych 31 s i dalej stabilnie | — |
+| Trwałość LAB2 | `POST /listings` (oferta 4), restart market-service, `GET :8102/refresh-check/4` | `200` z ofertą 4 | `200`, `listing.id = 4` | — |
+| Cache LAB2 | `GET :8101/listings/2` dwa razy | `MISS`, `HIT` | `X-Cache: MISS`, potem `HIT` | — |
+| Redis niedostępny | `docker stop lab2-redis`; `/ready`, `listings/4`, `refresh-check/1` | Działanie bez cache | `/ready` `degraded`, `X-Cache: BYPASS`, `refresh-check` `200` | `docker start lab2-redis` |
+| Testy automatyczne | `pytest` bez Eureka Server | Testy z atrapą, w tym `502` | `39 passed` i `21 passed` | — |
+
+Przykład z paczki uruchomiono osobno ([czesc-a-lab3-locker-service.md](czesc-a-lab3-locker-service.md)).
+
+### 9.6. Ograniczenia i dokumentacja
+
+**Zachowanie po niedostępności usługi lub rejestru**
+
+- **Awaria usługi:** collector działa i odpowiada `503` tylko w endpoincie zależnym. Żądanie trwa wtedy ok. 2,9 s, bo adres jest jeszcze w kopii i klient próbuje się połączyć. Po zniknięciu wpisu z kopii `503` jest natychmiastowe.
+- **Awaria rejestru:** znane adresy nadal działają, ale nowa instancja bez kopii rejestru nie znajdzie zależności (`503`). Usługa startuje mimo braku rejestru, bo biblioteka łapie błąd rejestracji i ponawia ją przy kolejnym heartbeat. Rejestr po restarcie jest pusty, a klienci rejestrują się sami, ale usługi były niewidoczne lub nieznalezione jeszcze przez ok. 80 s (48 s do powrotu wpisów i 31 s do pierwszego `200`).
+- **Awaria Redis:** nie wpływa na przepływ — market-service czyta z bazy (`BYPASS`).
+
+**Obserwacja wpisu po zatrzymaniu i lokalna kopia**
+
+- **Po Ctrl+C:** klient wyrejestrowuje instancję, ale odczyt `/eureka/apps` pokazywał `UP` jeszcze przez ok. 20–35 s; wpis zniknął między 19:57:26 a 19:57:41 po zatrzymaniu o 19:57:05. Przy zamknięciu po restarcie rejestru zniknął po ok. 3 s, więc czas nie jest stały.
+- **Po `kill`:** wyrejestrowania nie ma i wpis `UP` trwał przez całe 150 s obserwacji, mimo że dzierżawa to 90 s. Nie ustalono, czy było to samo opóźnienie usuwania, czy self-preservation; mechanizmu zgodnie z instrukcją nie wyłączano.
+- **Lokalna kopia** odświeża się co 30 s, więc nawet przy wpisie `UP` w panelu pierwsze żądania mogą dać `503` (obserwowane 25–28 s). Prawdopodobnie dokłada się do tego pamięć podręczna odpowiedzi serwera; nie zmierzono tego osobno.
+- **`UP`, `/health` i odpowiedź domenowa to różne dowody.** Po `kill` rejestr pokazywał `UP`, a usługa nie odpowiadała. Eureka nie odpytuje `/health`.
+
+**Pozostałe ograniczenia**
+
+- **Znana usterka market-service:** identyfikator większy niż zakres `INTEGER` w SQLite daje `OverflowError` i `500` przy `GET /listings/{id}`. Jest to błąd z LAB2 i przez collector staje się `502`. Nie poprawiono go, bo LAB3 nie zmienia API ani persystencji pierwszej usługi; poprawka to walidacja zakresu w ścieżce.
+- **Opóźnienie przez `localhost`:** wywołanie przez `do_service()` trwa ok. 0,85 s, a bezpośrednie po `127.0.0.1` ok. 0,02 s. Prawdopodobną przyczyną jest nazwa `localhost` w Windows, gdy Uvicorn słucha tylko na IPv4; nie sprawdzono tego osobno. Zachowano konfigurację z instrukcji.
+- **Stan portali w collectorze jest stały.** To mały zestaw lokalny dopuszczony przez instrukcję: nie ma bazy, zapisu ani wykrywania odmów. `blocked_until` działa w regule, a w scenariuszu ręcznym widać tylko `enabled`, bo dane początkowe nie mają wstrzymania.
+- **Odczyt może pochodzić z cache** market-service (TTL 60 s). Nie szkodzi to: collector używa pól, które praktycznie się nie zmieniają, z wyjątkiem `last_seen_at`, które ma charakter informacyjny.
+- **Panel i Ctrl+C:** stan odczytano przez API rejestru, a zatrzymanie wykonał sygnał. Otwarcie panelu i ręczny `Ctrl+C` przed odbiorem należy wykonać samodzielnie.
+- **Rejestr bez replikacji:** jeden serwer, bez klastra — zgodnie z zakresem etapu.
+
+**Wykorzystana dokumentacja**
+
+| Źródło i wersja | Problem | Zastosowanie | Weryfikacja |
+|---|---|---|---|
+| [Eureka REST operations — Netflix](https://github.com/Netflix/eureka/wiki/Eureka-REST-operations) | Czym są rejestracja, heartbeat, wyrejestrowanie i jak odczytać stan bez panelu; dokumentacja pokazuje `/eureka/v2`, a serwer Spring — `/eureka` | `eureka_context="/eureka"`; skrypt scenariuszy czyta `GET /eureka/apps` z `Accept: application/json` | Wpisy `UP` z poprawnym hostem i portem; zniknięcie wpisu po Ctrl+C |
+| [Server Self Preservation Mode — Netflix](https://github.com/Netflix/eureka/wiki/Server-Self-Preservation-Mode) | Dlaczego wpis może zostać po utracie heartbeatów | Nie oczekiwano usunięcia po określonym czasie, mechanizmu nie wyłączono; zapisano czas obserwacji | Wpis `UP` przez 150 s po `kill`, `503` z collectora |
+| [Spring Cloud Netflix — Eureka Server](https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html) (Spring Cloud 2025.1.3 z `pom.xml`) | Czy adres z `/eureka` podawać w konfiguracji klienta | `EUREKA_SERVER_URL` jako adres bazowy, jak w `application.yml` paczki | Rejestracja obu usług na działającym serwerze |
+| [py-eureka-client 0.13.3 — PyPI](https://pypi.org/project/py-eureka-client/0.13.3/) i [repozytorium](https://github.com/keijack/python-eureka-client) oraz kod biblioteki | Jakie wyjątki zgłasza `do_service()`; czy `start()` przerywa aplikację bez rejestru | Kolejność `except`: `HTTPError` przed `URLError`; `strict_service_error_policy=False`; dodatkowa obsługa `ValueError`, bo `do_service` wykonuje `json.loads` poza mapowaniem błędów | Rzeczywiste `404` i `502` z zależności; testy z `DiscoverException` i `WalkNodeException`; start przy zatrzymanej Eurece |
+| [FastAPI — Lifespan Events](https://fastapi.tiangolo.com/advanced/events/) | Jak połączyć start klienta z zasobami LAB2 i zagwarantować zamknięcie | `storage_lifespan` zagnieżdżony w `lifespan`, `stop()` w `finally` | `test_instance_registers_only_after_storage_is_ready`, `test_stop_runs_and_storage_closes_when_registration_fails` |
+| [FastAPI — Async Tests](https://fastapi.tiangolo.com/advanced/async-tests/) | `ASGITransport` nie uruchamia `lifespan` | Jawne `app.router.lifespan_context(app)` w testach collectora | Testy korzystają z `app.state.eureka_client` ustawianego w `lifespan` |
+
+Kod `eureka.py` pochodzi z paczki LAB3; zmieniono tylko formatowanie i dopisano komentarze. Materiałów biblioteki nie traktowano jako specyfikacji Netflix: protokół porównano z dokumentacją REST.
+
+**Weryfikacja sugestii AI:** testy, 13 celowo wprowadzonych błędów (sekcja 9.4), scenariusze z prawdziwą Eureką (sekcja 9.5), sprawdzenie odpowiedzi HTTP odnośników oraz odczyt kodu biblioteki dla twierdzeń o jej wyjątkach. Dzięki temu poprawiono też założenie, że usługa nie wystartuje bez rejestru — wystartowała.
+
+### 9.7. Wkład autorów
+
+- **Autorzy i wkład:** Marek Kotulski.
+- **AI:** Claude Code (model Claude Opus 5.5, Anthropic). Zakres pomocy: integracja z Eureką, collector-service, testy LAB3, skrypt scenariuszy i szkic tej sekcji. Podstawą były instrukcja LAB3, paczka pomocnicza i model collectora z AutoRadar. Decyzje domenowe i wyniki trzeba umieć uzasadnić przy odbiorze; pomaga w tym [czesc-a-lab3-locker-service.md](czesc-a-lab3-locker-service.md).
+- **Kolejny etap:** zapis obserwacji z collectora do market-service, a później zdarzenie `listing.observed` (plan w sekcji 1), oraz własna baza collectora.

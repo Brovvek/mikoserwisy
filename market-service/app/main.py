@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import db_models  # noqa: F401 — rejestruje tabele we wspólnym Base.metadata
 from app.cache import JsonCache, make_redis
 from app.database import Base, make_database
+from app.eureka import create_eureka_client
 from app.models import ErrorMessage, Fuel, Listing, ListingCreate, ListingObservation
 from app.repository import ListingConflictError, ListingNotFoundError, ListingRepository
 
@@ -71,11 +72,12 @@ def error_response(description: str) -> dict:
     return {"model": ErrorMessage, "description": description}
 
 
-def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
-    """Adres bazy i klienta Redis można podać jawnie (testy); domyślnie pochodzą ze zmiennych środowiska."""
+def create_app(database_url: str | None = None, redis_client=None, eureka_client=None) -> FastAPI:
+    """Adres bazy i klientów Redis oraz Eureki można podać jawnie (testy); domyślnie pochodzą ze zmiennych środowiska."""
+    eureka = eureka_client if eureka_client is not None else create_eureka_client("MARKET-SERVICE", 8101)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def storage_lifespan(app: FastAPI):
         engine, sessions = make_database(
             database_url or os.getenv("DATABASE_URL", "sqlite:///./app.db")
         )
@@ -106,10 +108,21 @@ def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
             finally:
                 engine.dispose()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Instancja zgłasza się do rejestru, gdy baza i cache są gotowe, a wyrejestrowuje przed ich zamknięciem.
+        async with storage_lifespan(app):
+            app.state.eureka_client = eureka
+            try:
+                await eureka.start()
+                yield
+            finally:
+                await eureka.stop()
+
     app = FastAPI(
         title="Market Service",
-        description="Oferty z portali ogłoszeniowych z samochodami i historia ich cen — LAB2",
-        version="0.2.0",
+        description="Oferty z portali ogłoszeniowych z samochodami i historia ich cen — LAB3",
+        version="0.3.0",
         lifespan=lifespan,
     )
 

@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.fake_eureka import FakeEurekaClient
 from tests.memory_redis import MemoryRedis
 
 # Każdy test ma własną bazę w tmp_path i zaczyna od danych początkowych:
@@ -254,8 +255,8 @@ def test_invalid_observation_returns_422_and_does_not_change_state(
 
 def test_each_database_has_its_own_listings(tmp_path):
     # Od LAB2 o stanie decyduje adres bazy, a nie nowa instancja aplikacji.
-    first_app = create_app("sqlite:///" + (tmp_path / "first.db").as_posix(), MemoryRedis())
-    second_app = create_app("sqlite:///" + (tmp_path / "second.db").as_posix(), MemoryRedis())
+    first_app = create_app("sqlite:///" + (tmp_path / "first.db").as_posix(), MemoryRedis(), FakeEurekaClient())
+    second_app = create_app("sqlite:///" + (tmp_path / "second.db").as_posix(), MemoryRedis(), FakeEurekaClient())
     with TestClient(first_app) as first, TestClient(second_app) as second:
         assert first.post("/listings", json=listing_payload()).status_code == 201
 

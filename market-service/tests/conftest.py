@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.fake_eureka import FakeEurekaClient
 from tests.memory_redis import MemoryRedis
 
 CACHE_PREFIX = "lab2:test:market-service"
@@ -31,5 +32,6 @@ def fake_redis():
 
 @pytest.fixture
 def client(database_url, fake_redis):
-    with TestClient(create_app(database_url=database_url, redis_client=fake_redis)) as test_client:
+    app = create_app(database_url=database_url, redis_client=fake_redis, eureka_client=FakeEurekaClient())
+    with TestClient(app) as test_client:
         yield test_client

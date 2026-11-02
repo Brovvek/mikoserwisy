@@ -4,6 +4,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.main import create_app
 from tests.conftest import cache_key
+from tests.fake_eureka import FakeEurekaClient
 from tests.memory_redis import MemoryRedis
 from tests.test_listings import listing_payload
 
@@ -25,12 +26,12 @@ def count_repository_reads(client, monkeypatch):
 
 
 def test_listing_survives_restart_with_empty_cache(database_url):
-    with TestClient(create_app(database_url=database_url, redis_client=MemoryRedis())) as first:
+    with TestClient(create_app(database_url=database_url, redis_client=MemoryRedis(), eureka_client=FakeEurekaClient())) as first:
         created = first.post("/listings", json=listing_payload()).json()
         assert first.patch("/listings/1", json=NEWER_OBSERVATION).status_code == 200
 
     # Nowa instancja z tą samą bazą i nowym, pustym cache — odpowiedź musi pochodzić z bazy.
-    with TestClient(create_app(database_url=database_url, redis_client=MemoryRedis())) as second:
+    with TestClient(create_app(database_url=database_url, redis_client=MemoryRedis(), eureka_client=FakeEurekaClient())) as second:
         response = second.get("/listings/4")
         assert response.status_code == 200
         assert response.headers["X-Cache"] == "MISS"
