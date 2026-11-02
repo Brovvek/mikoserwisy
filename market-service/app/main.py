@@ -1,13 +1,22 @@
+import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
+from app import db_models  # noqa: F401 — rejestruje tabele we wspólnym Base.metadata
+from app.cache import JsonCache, make_redis
+from app.database import Base, make_database
 from app.models import ErrorMessage, Fuel, Listing, ListingCreate, ListingObservation
-from app.store import ListingConflictError, ListingNotFoundError, ListingStore
+from app.repository import ListingConflictError, ListingNotFoundError, ListingRepository
 
 SERVICE_NAME = "market-service"
 
-# Każda nowa instancja aplikacji — także po restarcie procesu — zaczyna od tych ofert.
+# Dane początkowe trafiają tylko do pustej bazy, więc restart nie cofa zapisanych zmian.
 INITIAL_LISTINGS = (
     ListingCreate(
         source="otomoto",
@@ -62,34 +71,99 @@ def error_response(description: str) -> dict:
     return {"model": ErrorMessage, "description": description}
 
 
-def create_app() -> FastAPI:
+def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
+    """Adres bazy i klienta Redis można podać jawnie (testy); domyślnie pochodzą ze zmiennych środowiska."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        engine, sessions = make_database(
+            database_url or os.getenv("DATABASE_URL", "sqlite:///./app.db")
+        )
+        client = None
+        try:
+            client = redis_client if redis_client is not None else make_redis(
+                os.getenv("REDIS_URL", "redis://localhost:6379/0")
+            )
+            Base.metadata.create_all(engine)  # tworzy brakujące tabele; nie zmienia istniejących
+            repository = ListingRepository(sessions)
+            if repository.is_empty():
+                for data in INITIAL_LISTINGS:
+                    repository.create(data)
+            app.state.engine = engine
+            app.state.redis = client
+            app.state.repository = repository
+            app.state.cache = JsonCache(
+                client,
+                prefix=os.environ["CACHE_PREFIX"],
+                ttl=int(os.getenv("CACHE_TTL_SECONDS", "60")),
+                resource_name="listing",
+            )
+            yield
+        finally:
+            try:
+                if client is not None:
+                    client.close()
+            finally:
+                engine.dispose()
+
     app = FastAPI(
         title="Market Service",
-        description="Oferty z portali ogłoszeniowych z samochodami i historia ich cen — LAB1",
-        version="0.1.0",
+        description="Oferty z portali ogłoszeniowych z samochodami i historia ich cen — LAB2",
+        version="0.2.0",
+        lifespan=lifespan,
     )
-    # Każda instancja aplikacji ma własny magazyn w pamięci z tymi samymi danymi początkowymi.
-    app.state.listings = ListingStore()
-    for data in INITIAL_LISTINGS:
-        app.state.listings.create(data)
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": SERVICE_NAME}
+
+    @app.get("/ready")
+    def readiness() -> JSONResponse:
+        """Gotowość: baza jest wymagana (503 bez niej), Redis opcjonalny (bez niego „degraded”, 200)."""
+        try:
+            with app.state.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            db_ok = True
+        except SQLAlchemyError:
+            db_ok = False
+        try:
+            cache_ok = bool(app.state.redis.ping())
+        except RedisError:
+            cache_ok = False
+        status = "ok" if (db_ok and cache_ok) else ("degraded" if db_ok else "error")
+        return JSONResponse(
+            status_code=200 if db_ok else 503,
+            content={
+                "service": SERVICE_NAME,
+                "status": status,
+                "database": "ok" if db_ok else "down",
+                "cache": "ok" if cache_ok else "down",
+            },
+        )
 
     @app.get("/listings")
     def list_listings(
         make: str | None = None, model: str | None = None, country: str | None = None
     ) -> list[Listing]:
         """Lista ofert, opcjonalnie tylko jednej marki, modelu lub kraju."""
-        return app.state.listings.list_listings(make=make, model=model, country=country)
+        return app.state.repository.list_listings(make=make, model=model, country=country)
 
     @app.get("/listings/{listing_id}", responses={404: error_response("Listing not found")})
-    def get_listing(listing_id: int) -> Listing:
+    def get_listing(listing_id: int, response: Response) -> Listing:
+        """Szczegóły oferty. Nagłówek X-Cache: HIT, MISS albo BYPASS (cache niedostępny)."""
+        # Cache-aside: najpierw kopia w Redis, przy jej braku baza i zapis kopii z TTL.
+        cached, source = app.state.cache.get(listing_id)
+        if cached is not None:
+            response.headers["X-Cache"] = source
+            return cached
         try:
-            return app.state.listings.get(listing_id)
+            listing = app.state.repository.get(listing_id)
         except ListingNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if source != "BYPASS" and not app.state.cache.put(listing_id, listing.model_dump(mode="json")):
+            source = "BYPASS"
+        response.headers["X-Cache"] = source
+        return listing
 
     @app.post(
         "/listings",
@@ -99,7 +173,7 @@ def create_app() -> FastAPI:
     def create_listing(data: ListingCreate) -> Listing:
         """Rejestruje nową ofertę odczytaną z portalu."""
         try:
-            return app.state.listings.create(data)
+            return app.state.repository.create(data)
         except ListingConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -113,11 +187,14 @@ def create_app() -> FastAPI:
     def record_observation(listing_id: int, observation: ListingObservation) -> Listing:
         """Zapisuje nowszą obserwację oferty: aktualną cenę i przebieg."""
         try:
-            return app.state.listings.record_observation(listing_id, observation)
+            listing = app.state.repository.record_observation(listing_id, observation)
         except ListingNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ListingConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # Unieważnienie dopiero po commicie. Nieudane nie cofa zapisu — stara kopia żyje najdłużej do TTL.
+        app.state.cache.delete(listing_id)
+        return listing
 
     return app
 

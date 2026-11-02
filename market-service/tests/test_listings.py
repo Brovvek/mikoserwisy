@@ -2,8 +2,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.memory_redis import MemoryRedis
 
-# Każdy test zaczyna od danych początkowych:
+# Każdy test ma własną bazę w tmp_path i zaczyna od danych początkowych:
 # 1 — otomoto, BMW Seria 3, 104 900 PLN, ostatnia obserwacja 2026-10-20 08:00 UTC;
 # 2 — autoscout24_de, BMW Seria 3, 22 400 EUR; 3 — autobazar_eu, Skoda Octavia, 15 900 EUR.
 
@@ -251,8 +252,11 @@ def test_invalid_observation_returns_422_and_does_not_change_state(
     assert client.get("/listings/1").json() == before
 
 
-def test_each_application_has_its_own_store():
-    with TestClient(create_app()) as first, TestClient(create_app()) as second:
+def test_each_database_has_its_own_listings(tmp_path):
+    # Od LAB2 o stanie decyduje adres bazy, a nie nowa instancja aplikacji.
+    first_app = create_app("sqlite:///" + (tmp_path / "first.db").as_posix(), MemoryRedis())
+    second_app = create_app("sqlite:///" + (tmp_path / "second.db").as_posix(), MemoryRedis())
+    with TestClient(first_app) as first, TestClient(second_app) as second:
         assert first.post("/listings", json=listing_payload()).status_code == 201
 
         assert first.get("/listings/4").status_code == 200
